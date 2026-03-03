@@ -22,52 +22,51 @@ bool RadarSensor::update() {
   static uint8_t aa_data[26];
   static uint8_t aa_idx = 0;
   static enum { SYNC, FD_WAIT_F8, FD_READ, AA_READ } state = SYNC;
+  static uint8_t prev = 0;
+  static uint8_t last4[4] = {0};
 
   bool data_updated = false;
-
 #if RADAR_DEBUG_FRAMING
-  static uint8_t prev = 0;
+  static uint32_t rx_bytes = 0;
   static uint32_t cnt_fd_f8 = 0;
   static uint32_t cnt_aa_ff03_00 = 0;
-  static uint8_t last4[4] = {0};
-  static uint8_t sample[32];
-  static uint8_t sample_len = 0;
-  static bool sampling_fd = false;
-  static bool sampling_aa = false;
   static unsigned long last_report = 0;
 #endif
 
   while (radarSerial.available()) {
     uint8_t b = radarSerial.read();
+    uint8_t prev_b = prev;
+    prev = b;
 
 #if RADAR_DEBUG_FRAMING
-    // Count AA FF 03 00 pattern and FD F8 headers
-    last4[0] = last4[1]; last4[1] = last4[2]; last4[2] = last4[3]; last4[3] = b;
-    if (last4[0] == 0xAA && last4[1] == 0xFF && last4[2] == 0x03 && last4[3] == 0x00) {
-      cnt_aa_ff03_00++;
-    }
-    if (prev == 0xFD && b == 0xF8) {
-      cnt_fd_f8++;
-      sampling_fd = true; sampling_aa = false; sample_len = 0;
-      sample[sample_len++] = 0xFD; sample[sample_len++] = 0xF8;
-    } else if (sampling_fd) {
-      if (sample_len < sizeof(sample)) sample[sample_len++] = b; else sampling_fd = false;
-    }
-    prev = b;
+    rx_bytes++;
 #endif
+    // Keep sliding byte history for header detection.
+    last4[0] = last4[1];
+    last4[1] = last4[2];
+    last4[2] = last4[3];
+    last4[3] = b;
+
+    if (prev_b == 0xFD && b == 0xF8) {
+#if RADAR_DEBUG_FRAMING
+      cnt_fd_f8++;
+#endif
+    }
+    if (last4[0] == 0xAA && last4[1] == 0xFF && last4[2] == 0x03 && last4[3] == 0x00) {
+#if RADAR_DEBUG_FRAMING
+      cnt_aa_ff03_00++;
+#endif
+    }
+
 
     // Header detection in SYNC
     if (state == SYNC) {
-      if (prev == 0xFD && b == 0xF8) {
+      if (prev_b == 0xFD && b == 0xF8) {
         fd_frame[0] = 0xFD; fd_frame[1] = 0xF8; fd_idx = 2; state = FD_READ;
         continue;
       }
       if (last4[0] == 0xAA && last4[1] == 0xFF && last4[2] == 0x03 && last4[3] == 0x00) {
         aa_idx = 0; state = AA_READ;
-#if RADAR_DEBUG_FRAMING
-        sampling_aa = true; sampling_fd = false; sample_len = 0;
-        sample[sample_len++] = 0xAA; sample[sample_len++] = 0xFF; sample[sample_len++] = 0x03; sample[sample_len++] = 0x00;
-#endif
         continue;
       }
     }
@@ -85,11 +84,7 @@ bool RadarSensor::update() {
     // AA FF 03 00 payload + tail
     if (state == AA_READ) {
       aa_data[aa_idx++] = b;
-#if RADAR_DEBUG_FRAMING
-      if (sampling_aa) {
-        if (sample_len < sizeof(sample)) sample[sample_len++] = b; else sampling_aa = false;
-      }
-#endif
+
       if (aa_idx >= sizeof(aa_data)) {
         // Expect tail 55 CC
         if (aa_data[24] == 0x55 && aa_data[25] == 0xCC) {
@@ -102,15 +97,17 @@ bool RadarSensor::update() {
     }
 
 #if RADAR_DEBUG_FRAMING
-  if (millis() - last_report > 1000) {
+  if (millis() - last_report >= 1000) {
     last_report = millis();
-    Serial.print("Framing fd_f8="); Serial.print(cnt_fd_f8);
-    Serial.print(" aa_ff_03_00="); Serial.print(cnt_aa_ff03_00);
-    Serial.print(" sample:");
-    for (uint8_t i = 0; i < sample_len; ++i) {
-      Serial.print(" 0x"); if (sample[i] < 0x10) Serial.print("0"); Serial.print(sample[i], HEX);
-    }
-    Serial.println();
+    Serial.print("RADAR RX bytes/s=");
+    Serial.print(rx_bytes);
+    Serial.print(" fd_f8=");
+    Serial.print(cnt_fd_f8);
+    Serial.print(" aa_ff_03_00=");
+    Serial.println(cnt_aa_ff03_00);
+    rx_bytes = 0;
+    cnt_fd_f8 = 0;
+    cnt_aa_ff03_00 = 0;
   }
 #endif
 
